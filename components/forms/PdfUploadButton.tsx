@@ -14,9 +14,8 @@ async function extractTextFromPDFBrowser(file: File): Promise<string> {
   // Dynamically import pdfjs only when needed
   const pdfjsLib = await import('pdfjs-dist')
 
-  // Point worker to the CDN version so Next.js doesn't need to bundle it
-  pdfjsLib.GlobalWorkerOptions.workerSrc =
-    `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`
+  // Use the worker file served from /public (works on Vercel and locally)
+  pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs'
 
   const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise
 
