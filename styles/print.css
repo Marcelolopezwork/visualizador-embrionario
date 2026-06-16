@@ -1,0 +1,42 @@
+@media print {
+  /* Hide navigation and form elements */
+  .print\:hidden,
+  nav,
+  button,
+  [role="navigation"] {
+    display: none !important;
+  }
+
+  /* Preserve color palette */
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  body {
+    background: #FAF7F4 !important;
+    color: #1C2B3A !important;
+    font-family: 'DM Sans', sans-serif;
+  }
+
+  /* Page breaks */
+  .scene-cover,
+  .scene-timeline,
+  .scene-final-result,
+  .scene-closing {
+    page-break-before: always;
+  }
+
+  .scene-cover:first-child {
+    page-break-before: auto;
+  }
+
+  /* Prevent orphaned elements */
+  h2, h3 {
+    page-break-after: avoid;
+  }
+
+  table {
+    page-break-inside: avoid;
+  }
+}

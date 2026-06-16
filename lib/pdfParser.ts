@@ -1,0 +1,253 @@
+import { EmbryoCase, EmbryoEvolution, EmbryoStatus } from './types'
+
+/**
+ * Parses pdftotext output from a FileMaker/Concebir ICSI lab report.
+ * The PDF lays out columns horizontally; pdftotext reads them top-to-bottom
+ * so embryo data is scattered across lines, not row-by-row.
+ */
+export function parseLabReportText(raw: string): Partial<EmbryoCase> {
+  const lines = raw.split('\n').map(l => l.trim())
+  const nonEmpty = lines.filter(Boolean)
+  const text = nonEmpty.join('\n')
+
+  // ── Procedure type ──────────────────────────────────────────────
+  const procedureType: EmbryoCase['procedureType'] =
+    /ICSI/i.test(text) ? 'ICSI' :
+    /FIV/i.test(text) ? 'FIV' :
+    /CRI[OO]/i.test(text) ? 'CRIO_OVOCITOS' : 'ICSI'
+
+  // ── Patient name ────────────────────────────────────────────────
+  // Line 5: "Paciente", Line 6: "YOVANNA CCORA MENDOZA"
+  const patientName = lineAfterLabel(nonEmpty, /^Paciente$/i)
+
+  // ── Age ─────────────────────────────────────────────────────────
+  const ageMatch = text.match(/(\d+)\s*años/)
+  const patientAge = ageMatch ? parseInt(ageMatch[1], 10) : undefined
+
+  // ── Date ────────────────────────────────────────────────────────
+  const dateMatch = text.match(/Fecha Procedimiento\s+(\d{1,2}\/\d{1,2}\/\d{4})/)
+  const procedureDate = dateMatch ? toISO(dateMatch[1]) : undefined
+
+  // ── Doctor ──────────────────────────────────────────────────────
+  // "Medico" label then two lines: "Edwin Victor Canales\nRimachi"
+  const medicoIdx = nonEmpty.findIndex(l => /^M[eé]dico$/i.test(l))
+  const doctorName = medicoIdx >= 0
+    ? [nonEmpty[medicoIdx + 1], nonEmpty[medicoIdx + 2]]
+        .filter(l => l && !/^\d/.test(l) && !/^Edwin.*Rimachi/i.test(l) && l.length > 2)
+        .join(' ').trim() || undefined
+    : undefined
+
+  // Grab lines between "Medico" and "Inducción", skip lines that are digits or "40 años"
+  const doctorBlock = text.match(/M[eé]dico\s*\n([\s\S]+?)\nInducción/i)
+  const doctorFull = doctorBlock
+    ? doctorBlock[1].split('\n')
+        .map(l => l.trim())
+        .filter(l => l && !/^\d+\s*(años)?$/.test(l))
+        .join(' ').trim()
+    : doctorName
+
+  // ── Biologist ───────────────────────────────────────────────────
+  // "Luis Guzman Masias\nBiologo"
+  const bioIdx = nonEmpty.findIndex(l => /^Bi[oó]logo$/i.test(l))
+  const biologistName = bioIdx > 0 ? nonEmpty[bioIdx - 1]?.trim() : undefined
+
+  // ── Oocytes ─────────────────────────────────────────────────────
+  // In this PDF layout, labels appear as a block: Total/Decumulados/VG/MI/MII/Atres.
+  // followed by values only for filled fields (non-blank).
+  // pdftotext output: [..., 'Atres.', '10', '10', 'Ovocitos inyectados', '10', ...]
+  // The values after 'Atres.' map to: Total=10, Decumulados=10 (in column order)
+  // MII is at position +2 from its label (MII -> Atres. -> 10)
+  const atresIdx = nonEmpty.findIndex(l => /^Atres\.$/.test(l))
+  const oocyteValues: number[] = []
+  if (atresIdx >= 0) {
+    for (let i = atresIdx + 1; i < Math.min(atresIdx + 6, nonEmpty.length); i++) {
+      const n = parseInt(nonEmpty[i], 10)
+      if (!isNaN(n) && n < 1000 && String(n) === nonEmpty[i]) oocyteValues.push(n)
+      else if (/[A-Za-z]/.test(nonEmpty[i]) && nonEmpty[i].length > 3) break
+    }
+  }
+  const totalOocytes = oocyteValues[0] ?? 0
+  const decumulatedOocytes = oocyteValues[1] || undefined
+  // VG / MI / Atres. are usually blank in ICSI reports
+  const vgOocytes: number | undefined = undefined
+  const miOocytes: number | undefined = undefined
+  const atreticOocytes: number | undefined = undefined
+  // MII: first number after 'MII' label (skips 'Atres.' which is NaN)
+  const miiIdx = nonEmpty.findIndex(l => /^MII$/.test(l))
+  let miiOocytes: number | undefined
+  if (miiIdx >= 0) {
+    for (let i = miiIdx + 1; i < Math.min(miiIdx + 8, nonEmpty.length); i++) {
+      const n = parseInt(nonEmpty[i], 10)
+      if (!isNaN(n) && n < 1000 && String(n) === nonEmpty[i]) { miiOocytes = n; break }
+    }
+  }
+  const injMatch = text.match(/Ovocitos inyectados[\s\n]+(\d+)/)
+  const injectedOocytes = injMatch ? parseInt(injMatch[1], 10) : undefined
+
+  // ── Fertilization ───────────────────────────────────────────────
+  // "No fecundado\n1 PN\n3\n\n2 PN\n5\n\n50\n\nSemen...\n\n3 PN\n1\nCitolizados\n1"
+  // The "50" is motility — citolizados appears after Semen Fresco section
+  // In this PDF layout: "No fecundado\n1 PN\n3" — the '3' is actually notFertilized count
+  // pdftotext reads column headers then values: NF_label, 1PN_label, NF_value
+  const noFertMatch = text.match(/No fecundado\n1 PN\n(\d+)/)
+  const notFertilized = noFertMatch ? parseInt(noFertMatch[1], 10) : undefined
+
+  // 1PN value appears after the 2PN block in this layout (usually blank/0)
+  const onePNMatch = text.match(/1 PN\n(\d+)\n\n2 PN/)
+  const onePN = onePNMatch ? parseInt(onePNMatch[1], 10) : undefined
+
+  const twoPNMatch = text.match(/2 PN\n(\d+)/)
+  const twoPN = twoPNMatch ? parseInt(twoPNMatch[1], 10) : undefined
+
+  const threePNMatch = text.match(/3 PN\n(\d+)/)
+  const threePN = threePNMatch ? parseInt(threePNMatch[1], 10) : undefined
+
+  const citoMatch = text.match(/Citolizados\n(\d+)/)
+  const cytolyzed = citoMatch ? parseInt(citoMatch[1], 10) : undefined
+
+  // ── Embryo table ────────────────────────────────────────────────
+  // After "OUT" the embryo data appears as:
+  // embryo_number\nday0_value /\nday4_value /\n...\nSTATUS_LETTER
+  // We find the section between "OUT" and "mn:"
+  const embryos = extractEmbryos(text)
+
+  // ── Final result ─────────────────────────────────────────────────
+  // "Transferido\n\n0\n\nDía Transferencia\n\nCriopreservado\n\nDía Crio.\n\n5\n\n6"
+  const transferredMatch = text.match(/Transferido\n+(\d+)/)
+  const cryoMatch = text.match(/Criopreservado\n+D[ií]a Crio\.\n+(\d+)\n+(\d+)/)
+  const cryoSimple = text.match(/Criopreservado[\s\S]{0,30}?(\d+)\n/)
+
+  const transferredCount = transferredMatch ? parseInt(transferredMatch[1], 10) : undefined
+  const cryopreservedCount = cryoMatch ? parseInt(cryoMatch[1], 10) : cryoSimple ? parseInt(cryoSimple[1], 10) : undefined
+  const cryopreservationDay = cryoMatch ? parseInt(cryoMatch[2], 10) : undefined
+
+  return {
+    patientName: patientName || undefined,
+    patientAge,
+    doctorName: doctorFull || undefined,
+    biologistName,
+    procedureDate,
+    procedureType,
+    oocytes: {
+      totalOocytes,
+      decumulatedOocytes,
+      vgOocytes,
+      miOocytes,
+      miiOocytes,
+      atreticOocytes,
+      injectedOocytes,
+    },
+    fertilization: { notFertilized, onePN, twoPN, threePN, cytolyzed },
+    embryos,
+    finalResult: { transferredCount, cryopreservedCount, cryopreservationDay },
+  }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function lineAfterLabel(lines: string[], pattern: RegExp): string | undefined {
+  const idx = lines.findIndex(l => pattern.test(l))
+  if (idx < 0) return undefined
+  // Skip lines that look like labels or are empty
+  for (let i = idx + 1; i < Math.min(idx + 4, lines.length); i++) {
+    const l = lines[i]
+    if (l && l.length > 2 && !/^\d+$/.test(l)) return l.trim()
+  }
+  return undefined
+}
+
+function numberAfterLabel(lines: string[], pattern: RegExp): number | undefined {
+  const idx = lines.findIndex(l => pattern.test(l))
+  if (idx < 0) return undefined
+  // Search further — labels are grouped together before their values in this PDF format
+  for (let i = idx + 1; i < Math.min(idx + 12, lines.length); i++) {
+    const n = parseInt(lines[i], 10)
+    if (!isNaN(n) && n < 1000 && String(n) === lines[i].trim()) return n
+  }
+  return undefined
+}
+
+const STATUS_MAP: Record<string, EmbryoStatus> = {
+  C: 'criopreservado',
+  T: 'transferido',
+  D: 'detenido',
+  NF: 'no_viable',
+}
+
+function extractEmbryos(text: string): EmbryoEvolution[] {
+  // Find section between OUT and "mn:" legend
+  const start = text.indexOf('OUT')
+  const end = text.indexOf('mn: multinucleado')
+  if (start < 0) return []
+
+  const section = end > start ? text.slice(start + 3, end) : text.slice(start + 3, start + 1500)
+  const tokens = section.split('\n').map(l => l.trim()).filter(Boolean)
+
+  // Tokens are interleaved: emb#, val/, val/, ..., STATUS_LETTER, emb#, ...
+  // Group them into embryo chunks: starts at a single-digit number
+  const embryos: EmbryoEvolution[] = []
+  let current: string[] = []
+  let currentNum = 0
+
+  const flush = () => {
+    if (!currentNum || current.length === 0) return
+    const embryo: EmbryoEvolution = { embryoNumber: currentNum }
+    const parts = current
+      .map(t => t.replace(/\/$/, '').trim())
+      .filter(Boolean)
+
+    // Detect status
+    const lastUpper = parts[parts.length - 1]?.toUpperCase()
+    if (lastUpper && STATUS_MAP[lastUpper]) {
+      embryo.finalStatus = STATUS_MAP[lastUpper]
+      parts.pop()
+    }
+
+    // Assign values to days by content type
+    let blastCount = 0
+    for (const val of parts) {
+      const up = val.toUpperCase()
+      if (up === 'NGS' || up === 'NF') {
+        embryo.day0 = val
+        if (up === 'NF' && !embryo.finalStatus) embryo.finalStatus = 'no_viable'
+      } else if (up.includes('MORULA') || up === 'COMP') {
+        embryo.day4 = val
+      } else if (up.startsWith('BL.') || up.startsWith('BL ') || up.includes('BLAST')) {
+        blastCount++
+        if (blastCount === 1) embryo.day5 = val
+        else if (blastCount === 2) embryo.day6 = val
+        else embryo.day7 = val
+      } else if (/^\d+\s*CEL/i.test(val)) {
+        if (!embryo.day1) embryo.day1 = val
+        else if (!embryo.day2) embryo.day2 = val
+        else if (!embryo.day3) embryo.day3 = val
+      }
+    }
+
+    embryos.push(embryo)
+  }
+
+  for (const token of tokens) {
+    const n = parseInt(token, 10)
+    // A bare single/double digit on its own line = new embryo number
+    if (!isNaN(n) && n >= 1 && n <= 20 && String(n) === token) {
+      flush()
+      current = []
+      currentNum = n
+    } else {
+      current.push(token)
+    }
+  }
+  flush()
+
+  return embryos
+}
+
+function toISO(date: string): string {
+  const parts = date.split('/')
+  if (parts.length === 3) {
+    const [d, m, y] = parts
+    return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`
+  }
+  return date
+}

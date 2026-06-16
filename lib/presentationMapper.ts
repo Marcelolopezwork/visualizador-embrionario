@@ -11,6 +11,7 @@ export const SCENE_IDS = [
   'mature-oocytes',
   'injected',
   'fertilization',
+  'funnel',
   'timeline',
   'final-result',
   'closing',
@@ -25,8 +26,9 @@ export function mapCaseToScenes(data: EmbryoCase): PresentationScene[] {
     { sceneId: 'mature-oocytes', label: 'Ovocitos maduros' },
     { sceneId: 'injected', label: 'Ovocitos inyectados' },
     { sceneId: 'fertilization', label: 'Fertilización' },
-    { sceneId: 'timeline', label: 'Evolución embrionaria' },
+    { sceneId: 'funnel', label: 'Resumen del recorrido' },
+    { sceneId: 'timeline', label: 'Evolución día a día' },
     { sceneId: 'final-result', label: 'Resultado final' },
-    { sceneId: 'closing', label: 'Cierre' },
+    { sceneId: 'closing', label: 'Explicación para la paciente' },
   ]
 }

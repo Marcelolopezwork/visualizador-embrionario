@@ -25,7 +25,7 @@ export default function StepGeneralData({ data, onChange }: Props) {
         <div className="flex flex-col gap-1">
           <label htmlFor="procedureType" className="text-sm font-medium text-[#1C2B3A]">Tipo de procedimiento *</label>
           <select id="procedureType" value={data.procedureType} onChange={e => onChange({ procedureType: e.target.value as ProcedureType })}
-            className="w-full px-3 py-2 border border-[#CBD5E1] rounded text-sm text-[#1C2B3A] bg-white focus:outline-none focus:ring-2 focus:ring-[#2D6A7F]">
+            className="w-full px-3 py-2 border border-[#CBD5E1] rounded text-sm text-[#1C2B3A] bg-white focus:outline-none focus:ring-2 focus:ring-[#3A7D44]">
             {procedureTypes.map(pt => <option key={pt.value} value={pt.value}>{pt.label}</option>)}
           </select>
         </div>
