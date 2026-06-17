@@ -49,40 +49,65 @@ export function parseLabReportText(raw: string): Partial<EmbryoCase> {
   const biologistName = bioIdx > 0 ? nonEmpty[bioIdx - 1]?.trim() : undefined
 
   // ── Oocytes ─────────────────────────────────────────────────────
-  // With per-item pdfjs output, each label and its value are adjacent lines.
-  // Use numberAfterLabel which scans ahead skipping non-digit tokens.
+  // pdfjs per-item: oocyte value appears on the line right after its label.
+  // MI/VG/Atres are excluded: the adjacent semen column contaminates their values
+  // (e.g. "MI\n1\n" where "1" is semen motility, not MI oocytes).
   const totalOocytes = numberAfterLabel(nonEmpty, /^Total$/) ?? 0
   const decumulatedOocytes = numberAfterLabel(nonEmpty, /^D[eé]cumulados$|^Desacumulados$/) || undefined
   const miiOocytes = numberAfterLabel(nonEmpty, /^MII$/) || undefined
-  const miOocytes = numberAfterLabel(nonEmpty, /^MI$/) || undefined
-  const vgOocytes = numberAfterLabel(nonEmpty, /^VG$/) || undefined
-  const atreticOocytes = numberAfterLabel(nonEmpty, /^Atres\.$/) || undefined
+  const miOocytes: number | undefined = undefined   // skipped — semen column interferes
+  const vgOocytes: number | undefined = undefined   // skipped — semen column interferes
+  const atreticOocytes: number | undefined = undefined
   const injMatch = text.match(/Ovocitos inyectados[\s\n]+(\d+)/)
   const injectedOocytes = injMatch
     ? parseInt(injMatch[1], 10)
     : numberAfterLabel(nonEmpty, /^Ovocitos inyectados$/)
 
   // ── Fertilization ───────────────────────────────────────────────
-  // "No fecundado\n1 PN\n3\n\n2 PN\n5\n\n50\n\nSemen...\n\n3 PN\n1\nCitolizados\n1"
-  // The "50" is motility — citolizados appears after Semen Fresco section
-  // In this PDF layout: "No fecundado\n1 PN\n3" — the '3' is actually notFertilized count
-  // pdftotext reads column headers then values: NF_label, 1PN_label, NF_value
-  // Fertilization: labels appear together then values follow in the same order.
-  // Works for both pdftotext (column-separated) and pdfjs per-item output.
-  const noFertMatch = text.match(/No fecundado\s*\n(?:1 PN\s*\n)?(\d+)/)
-  const notFertilized = noFertMatch ? parseInt(noFertMatch[1], 10) : undefined
+  // pdfjs per-item: ALL labels appear first as a block, then values follow in same order.
+  // e.g.: "No fecundado\n1 PN\n2 PN\n3 PN\nCitolizados\nAtrésicos\n3\n2\n9"
+  // Detect this by checking if "1 PN" immediately follows "No fecundado".
+  // Fallback: old interleaved format from pdftotext.
+  const FERT_LABEL_PATS = [
+    /^No fecundado$/, /^1 PN$/, /^2 PN$/, /^3 PN$/, /^Citolizados$/, /^Atr[eé]sicos$/i,
+  ]
+  let notFertilized: number | undefined
+  let onePN: number | undefined
+  let twoPN: number | undefined
+  let threePN: number | undefined
+  let cytolyzed: number | undefined
 
-  const onePNMatch = text.match(/1 PN\s*\n(\d+)\s*\n(?:\n|2 PN)/)
-  const onePN = onePNMatch ? parseInt(onePNMatch[1], 10) : undefined
-
-  const twoPNMatch = text.match(/2 PN\s*\n(\d+)/)
-  const twoPN = twoPNMatch ? parseInt(twoPNMatch[1], 10) : undefined
-
-  const threePNMatch = text.match(/3 PN\s*\n(\d+)/)
-  const threePN = threePNMatch ? parseInt(threePNMatch[1], 10) : undefined
-
-  const citoMatch = text.match(/Citolizados\s*\n(\d+)/)
-  const cytolyzed = citoMatch ? parseInt(citoMatch[1], 10) : undefined
+  const nfIdx = nonEmpty.findIndex(l => /^No fecundado$/.test(l))
+  if (nfIdx >= 0) {
+    const allLabelsFirst = /^1 PN$/.test(nonEmpty[nfIdx + 1] ?? '')
+    if (allLabelsFirst) {
+      // Count consecutive fert labels starting at nfIdx
+      let labelEnd = nfIdx
+      for (const pat of FERT_LABEL_PATS) {
+        if (pat.test(nonEmpty[labelEnd] ?? '')) labelEnd++
+        else break
+      }
+      // Collect values right after the label block
+      const fertVals: Array<number | undefined> = Array(6).fill(undefined)
+      let vi = 0
+      for (let j = labelEnd; j < Math.min(labelEnd + 10, nonEmpty.length) && vi < 6; j++) {
+        const n = parseInt(nonEmpty[j], 10)
+        if (!isNaN(n) && String(n) === nonEmpty[j]) fertVals[vi++] = n
+        else if (vi > 0 && nonEmpty[j].length > 3) break
+      }
+      ;[notFertilized, onePN, twoPN, threePN, cytolyzed] = fertVals
+    } else {
+      // pdftotext interleaved format: NF value follows "No fecundado\n1 PN\n"
+      const noFertMatch = text.match(/No fecundado\n1 PN\n(\d+)/)
+      notFertilized = noFertMatch ? parseInt(noFertMatch[1], 10) : undefined
+      const twoPNMatch = text.match(/2 PN\n(\d+)/)
+      twoPN = twoPNMatch ? parseInt(twoPNMatch[1], 10) : undefined
+      const threePNMatch = text.match(/3 PN\n(\d+)/)
+      threePN = threePNMatch ? parseInt(threePNMatch[1], 10) : undefined
+      const citoMatch = text.match(/Citolizados\n(\d+)/)
+      cytolyzed = citoMatch ? parseInt(citoMatch[1], 10) : undefined
+    }
+  }
 
   // ── Embryo table ────────────────────────────────────────────────
   // After "OUT" the embryo data appears as:
@@ -103,26 +128,24 @@ export function parseLabReportText(raw: string): Partial<EmbryoCase> {
   let cryopreservationDay: number | undefined
 
   if (xferLabelIdx >= 0 && cryoLabelIdx >= 0) {
-    // Collect the first 3 numbers after the earlier of the two labels
+    // Labels appear in this order: Transferido, Día Transferencia, Criopreservado, Día Crio.
+    // Values follow (on page 2) in the same order: [transferred, día_trans, cryo, día_crio]
+    // e.g. [0, 0, 3, 6] — cryo is at index 2, not index 1.
     const scanFrom = Math.min(xferLabelIdx, cryoLabelIdx) + 1
     const resultNums: number[] = []
-    for (let i = scanFrom; i < Math.min(scanFrom + 15, nonEmpty.length); i++) {
+    for (let i = scanFrom; i < Math.min(scanFrom + 25, nonEmpty.length); i++) {
       const n = parseInt(nonEmpty[i], 10)
       if (!isNaN(n) && String(n) === nonEmpty[i] && n < 1000) {
         resultNums.push(n)
-        if (resultNums.length >= 3) break
+        if (resultNums.length >= 4) break
       }
     }
-    // Left column (Transferido) appears first in X, so its value is resultNums[0]
-    // Right column (Criopreservado) value is resultNums[1]; cryoDay is resultNums[2]
-    if (xferLabelIdx < cryoLabelIdx) {
-      transferredCount = resultNums[0]
+    transferredCount = resultNums[0]
+    cryopreservedCount = resultNums[2]   // skip Día Transferencia value at [1]
+    cryopreservationDay = resultNums[3]
+    // Fallback if fewer than 3 numbers found (e.g. when one value is missing)
+    if (cryopreservedCount === undefined && resultNums[1] !== undefined) {
       cryopreservedCount = resultNums[1]
-      cryopreservationDay = resultNums[2]
-    } else {
-      cryopreservedCount = resultNums[0]
-      transferredCount = resultNums[1]
-      cryopreservationDay = resultNums[2]
     }
   } else {
     transferredCount = xferLabelIdx >= 0 ? numberAfterLabel(nonEmpty, /^Transferido$/) : undefined
