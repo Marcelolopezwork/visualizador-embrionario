@@ -49,37 +49,18 @@ export function parseLabReportText(raw: string): Partial<EmbryoCase> {
   const biologistName = bioIdx > 0 ? nonEmpty[bioIdx - 1]?.trim() : undefined
 
   // ── Oocytes ─────────────────────────────────────────────────────
-  // In this PDF layout, labels appear as a block: Total/Decumulados/VG/MI/MII/Atres.
-  // followed by values only for filled fields (non-blank).
-  // pdftotext output: [..., 'Atres.', '10', '10', 'Ovocitos inyectados', '10', ...]
-  // The values after 'Atres.' map to: Total=10, Decumulados=10 (in column order)
-  // MII is at position +2 from its label (MII -> Atres. -> 10)
-  const atresIdx = nonEmpty.findIndex(l => /^Atres\.$/.test(l))
-  const oocyteValues: number[] = []
-  if (atresIdx >= 0) {
-    for (let i = atresIdx + 1; i < Math.min(atresIdx + 6, nonEmpty.length); i++) {
-      const n = parseInt(nonEmpty[i], 10)
-      if (!isNaN(n) && n < 1000 && String(n) === nonEmpty[i]) oocyteValues.push(n)
-      else if (/[A-Za-z]/.test(nonEmpty[i]) && nonEmpty[i].length > 3) break
-    }
-  }
-  const totalOocytes = oocyteValues[0] ?? 0
-  const decumulatedOocytes = oocyteValues[1] || undefined
-  // VG / MI / Atres. are usually blank in ICSI reports
-  const vgOocytes: number | undefined = undefined
-  const miOocytes: number | undefined = undefined
-  const atreticOocytes: number | undefined = undefined
-  // MII: first number after 'MII' label (skips 'Atres.' which is NaN)
-  const miiIdx = nonEmpty.findIndex(l => /^MII$/.test(l))
-  let miiOocytes: number | undefined
-  if (miiIdx >= 0) {
-    for (let i = miiIdx + 1; i < Math.min(miiIdx + 8, nonEmpty.length); i++) {
-      const n = parseInt(nonEmpty[i], 10)
-      if (!isNaN(n) && n < 1000 && String(n) === nonEmpty[i]) { miiOocytes = n; break }
-    }
-  }
+  // With per-item pdfjs output, each label and its value are adjacent lines.
+  // Use numberAfterLabel which scans ahead skipping non-digit tokens.
+  const totalOocytes = numberAfterLabel(nonEmpty, /^Total$/) ?? 0
+  const decumulatedOocytes = numberAfterLabel(nonEmpty, /^D[eé]cumulados$|^Desacumulados$/) || undefined
+  const miiOocytes = numberAfterLabel(nonEmpty, /^MII$/) || undefined
+  const miOocytes = numberAfterLabel(nonEmpty, /^MI$/) || undefined
+  const vgOocytes = numberAfterLabel(nonEmpty, /^VG$/) || undefined
+  const atreticOocytes = numberAfterLabel(nonEmpty, /^Atres\.$/) || undefined
   const injMatch = text.match(/Ovocitos inyectados[\s\n]+(\d+)/)
-  const injectedOocytes = injMatch ? parseInt(injMatch[1], 10) : undefined
+  const injectedOocytes = injMatch
+    ? parseInt(injMatch[1], 10)
+    : numberAfterLabel(nonEmpty, /^Ovocitos inyectados$/)
 
   // ── Fertilization ───────────────────────────────────────────────
   // "No fecundado\n1 PN\n3\n\n2 PN\n5\n\n50\n\nSemen...\n\n3 PN\n1\nCitolizados\n1"
@@ -110,14 +91,44 @@ export function parseLabReportText(raw: string): Partial<EmbryoCase> {
   const embryos = extractEmbryos(text)
 
   // ── Final result ─────────────────────────────────────────────────
-  // "Transferido\n\n0\n\nDía Transferencia\n\nCriopreservado\n\nDía Crio.\n\n5\n\n6"
-  const transferredMatch = text.match(/Transferido\n+(\d+)/)
-  const cryoMatch = text.match(/Criopreservado\n+D[ií]a Crio\.\n+(\d+)\n+(\d+)/)
-  const cryoSimple = text.match(/Criopreservado[\s\S]{0,30}?(\d+)\n/)
+  // In the two-column PDF, "Transferido" (left) and "Criopreservado" (right) share a row.
+  // Per-item output (Y→X sorted) gives: Transferido, Criopreservado, 0, 5, Día..., Día Crio., 6
+  // Since both labels appear before their values, we collect numbers after both labels
+  // and assign them left-to-right (Transferido gets 1st number, Criopreservado gets 2nd).
+  const xferLabelIdx = nonEmpty.findIndex(l => /^Transferido$/.test(l))
+  const cryoLabelIdx = nonEmpty.findIndex(l => /^Criopreservado$/.test(l))
 
-  const transferredCount = transferredMatch ? parseInt(transferredMatch[1], 10) : undefined
-  const cryopreservedCount = cryoMatch ? parseInt(cryoMatch[1], 10) : cryoSimple ? parseInt(cryoSimple[1], 10) : undefined
-  const cryopreservationDay = cryoMatch ? parseInt(cryoMatch[2], 10) : undefined
+  let transferredCount: number | undefined
+  let cryopreservedCount: number | undefined
+  let cryopreservationDay: number | undefined
+
+  if (xferLabelIdx >= 0 && cryoLabelIdx >= 0) {
+    // Collect the first 3 numbers after the earlier of the two labels
+    const scanFrom = Math.min(xferLabelIdx, cryoLabelIdx) + 1
+    const resultNums: number[] = []
+    for (let i = scanFrom; i < Math.min(scanFrom + 15, nonEmpty.length); i++) {
+      const n = parseInt(nonEmpty[i], 10)
+      if (!isNaN(n) && String(n) === nonEmpty[i] && n < 1000) {
+        resultNums.push(n)
+        if (resultNums.length >= 3) break
+      }
+    }
+    // Left column (Transferido) appears first in X, so its value is resultNums[0]
+    // Right column (Criopreservado) value is resultNums[1]; cryoDay is resultNums[2]
+    if (xferLabelIdx < cryoLabelIdx) {
+      transferredCount = resultNums[0]
+      cryopreservedCount = resultNums[1]
+      cryopreservationDay = resultNums[2]
+    } else {
+      cryopreservedCount = resultNums[0]
+      transferredCount = resultNums[1]
+      cryopreservationDay = resultNums[2]
+    }
+  } else {
+    transferredCount = xferLabelIdx >= 0 ? numberAfterLabel(nonEmpty, /^Transferido$/) : undefined
+    cryopreservedCount = cryoLabelIdx >= 0 ? numberAfterLabel(nonEmpty, /^Criopreservado$/) : undefined
+    cryopreservationDay = numberAfterLabel(nonEmpty, /^D[ií]a Crio\.$/)
+  }
 
   return {
     patientName: patientName || undefined,
