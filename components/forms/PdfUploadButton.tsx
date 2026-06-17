@@ -91,7 +91,8 @@ export default function PdfUploadButton({ onParsed }: Props) {
       setSuccess(true)
     } catch (err) {
       console.error(err)
-      setError('Error al procesar el PDF. Intentá de nuevo.')
+      const msg = err instanceof Error ? err.message : String(err)
+      setError(`Error al procesar el PDF: ${msg.slice(0, 120)}`)
     } finally {
       setLoading(false)
       if (inputRef.current) inputRef.current.value = ''
