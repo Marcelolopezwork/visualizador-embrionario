@@ -27,12 +27,11 @@ async function extractTextFromPDFBrowser(file: File): Promise<string> {
     type LineItem = { str: string; x: number; y: number }
 
     const items: LineItem[] = content.items
-      .filter((it): it is RawItem => 'str' in it && !!(it as RawItem).str.trim())
-      .map((it) => ({
-        str: it.str.trim(),
-        x: it.transform[4],
-        y: viewport.height - it.transform[5], // flip: PDF y=0 is bottom
-      }))
+      .filter((it) => 'str' in it && !!((it as RawItem).str ?? '').trim())
+      .map((it) => {
+        const raw = it as RawItem
+        return { str: raw.str.trim(), x: raw.transform[4], y: viewport.height - raw.transform[5] }
+      })
 
     // Group into lines: items within 6px vertically → same line
     const LINE_THRESHOLD = 6
