@@ -64,13 +64,14 @@ export function parseLabReportText(raw: string): Partial<EmbryoCase> {
     : numberAfterLabel(nonEmpty, /^Ovocitos inyectados$/)
 
   // ── Fertilization ───────────────────────────────────────────────
-  // pdfjs per-item: ALL labels appear first as a block, then values follow in same order.
-  // e.g.: "No fecundado\n1 PN\n2 PN\n3 PN\nCitolizados\nAtrésicos\n3\n2\n9"
-  // Detect this by checking if "1 PN" immediately follows "No fecundado".
-  // Fallback: old interleaved format from pdftotext.
-  const FERT_LABEL_PATS = [
-    /^No fecundado$/, /^1 PN$/, /^2 PN$/, /^3 PN$/, /^Citolizados$/, /^Atr[eé]sicos$/i,
-  ]
+  // pdfjs per-item groups labels before values within each section.
+  // Layout varies: single-column (all labels then values) or two-column
+  // (NF+2PN share a row; labels appear as NF,2PN,1PN,3PN,... then values in same order).
+  // Strategy: collect labels in pdfjs order, then map values to labels by position.
+  const FERT_ITEM_PAT = /^(No fecundado|1 PN|2 PN|3 PN|Citolizados|Atr[eé]sicos)$/i
+  const FERT_FIELD: Record<string, string> = {
+    'No fecundado': 'nf', '1 PN': '1pn', '2 PN': '2pn', '3 PN': '3pn', 'Citolizados': 'cito',
+  }
   let notFertilized: number | undefined
   let onePN: number | undefined
   let twoPN: number | undefined
@@ -79,34 +80,29 @@ export function parseLabReportText(raw: string): Partial<EmbryoCase> {
 
   const nfIdx = nonEmpty.findIndex(l => /^No fecundado$/.test(l))
   if (nfIdx >= 0) {
-    const allLabelsFirst = /^1 PN$/.test(nonEmpty[nfIdx + 1] ?? '')
-    if (allLabelsFirst) {
-      // Count consecutive fert labels starting at nfIdx
-      let labelEnd = nfIdx
-      for (const pat of FERT_LABEL_PATS) {
-        if (pat.test(nonEmpty[labelEnd] ?? '')) labelEnd++
-        else break
-      }
-      // Collect values right after the label block
-      const fertVals: Array<number | undefined> = Array(6).fill(undefined)
-      let vi = 0
-      for (let j = labelEnd; j < Math.min(labelEnd + 10, nonEmpty.length) && vi < 6; j++) {
-        const n = parseInt(nonEmpty[j], 10)
-        if (!isNaN(n) && String(n) === nonEmpty[j]) fertVals[vi++] = n
-        else if (vi > 0 && nonEmpty[j].length > 3) break
-      }
-      ;[notFertilized, onePN, twoPN, threePN, cytolyzed] = fertVals
-    } else {
-      // pdftotext interleaved format: NF value follows "No fecundado\n1 PN\n"
-      const noFertMatch = text.match(/No fecundado\n1 PN\n(\d+)/)
-      notFertilized = noFertMatch ? parseInt(noFertMatch[1], 10) : undefined
-      const twoPNMatch = text.match(/2 PN\n(\d+)/)
-      twoPN = twoPNMatch ? parseInt(twoPNMatch[1], 10) : undefined
-      const threePNMatch = text.match(/3 PN\n(\d+)/)
-      threePN = threePNMatch ? parseInt(threePNMatch[1], 10) : undefined
-      const citoMatch = text.match(/Citolizados\n(\d+)/)
-      cytolyzed = citoMatch ? parseInt(citoMatch[1], 10) : undefined
+    // Collect consecutive fert labels (in pdfjs Y→X order)
+    const fertLabelSeq: string[] = []
+    let labelEnd = nfIdx
+    while (labelEnd < Math.min(nfIdx + 10, nonEmpty.length) && FERT_ITEM_PAT.test(nonEmpty[labelEnd] ?? '')) {
+      fertLabelSeq.push(nonEmpty[labelEnd++])
     }
+    // Collect values right after the label block
+    const fertVals: number[] = []
+    for (let j = labelEnd; j < Math.min(labelEnd + 12, nonEmpty.length); j++) {
+      const n = parseInt(nonEmpty[j], 10)
+      if (!isNaN(n) && String(n) === nonEmpty[j]) {
+        fertVals.push(n)
+        if (fertVals.length >= fertLabelSeq.length) break
+      } else if (fertVals.length > 0 && nonEmpty[j].length > 3) break
+    }
+    // Map values to labels in order
+    const fv: Record<string, number | undefined> = {}
+    fertLabelSeq.forEach((lbl, i) => { if (i < fertVals.length) fv[FERT_FIELD[lbl] ?? ''] = fertVals[i] })
+    notFertilized = fv['nf']
+    onePN = fv['1pn']
+    twoPN = fv['2pn']
+    threePN = fv['3pn']
+    cytolyzed = fv['cito']
   }
 
   // ── Embryo table ────────────────────────────────────────────────
@@ -140,11 +136,17 @@ export function parseLabReportText(raw: string): Partial<EmbryoCase> {
         if (resultNums.length >= 4) break
       }
     }
+    // Layout varies by PDF:
+    // 3 values [transferred, cryo, día_crio]  → INFORME 1/4 (Día Transferencia is blank)
+    // 4 values [transferred, día_trans, cryo, día_crio] → INFORME 2 (Día Trans = 0 explicit)
     transferredCount = resultNums[0]
-    cryopreservedCount = resultNums[2]   // skip Día Transferencia value at [1]
-    cryopreservationDay = resultNums[3]
-    // Fallback if fewer than 3 numbers found (e.g. when one value is missing)
-    if (cryopreservedCount === undefined && resultNums[1] !== undefined) {
+    if (resultNums.length >= 4) {
+      cryopreservedCount = resultNums[2]  // Día Transferencia occupies slot [1]
+      cryopreservationDay = resultNums[3]
+    } else if (resultNums.length >= 3) {
+      cryopreservedCount = resultNums[1]
+      cryopreservationDay = resultNums[2]
+    } else if (resultNums.length >= 2) {
       cryopreservedCount = resultNums[1]
     }
   } else {
