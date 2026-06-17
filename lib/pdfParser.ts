@@ -105,6 +105,14 @@ export function parseLabReportText(raw: string): Partial<EmbryoCase> {
     cytolyzed = fv['cito']
   }
 
+  // Fallbacks: in some layouts (INFORME 4) "2 PN" appears at a different Y level
+  // (visually in the semen/oocyte area) so pdfjs outputs it before "No fecundado",
+  // meaning it won't be in the consecutive label block above. Direct lookup recovers it.
+  if (notFertilized === undefined) notFertilized = numberAfterLabel(nonEmpty, /^No fecundado$/)
+  if (twoPN === undefined) twoPN = numberAfterLabel(nonEmpty, /^2 PN$/)
+  if (cytolyzed === undefined) cytolyzed = numberAfterLabel(nonEmpty, /^Citolizados$/)
+  if (onePN === undefined) onePN = numberAfterLabel(nonEmpty, /^1 PN$/)
+
   // ── Embryo table ────────────────────────────────────────────────
   // After "OUT" the embryo data appears as:
   // embryo_number\nday0_value /\nday4_value /\n...\nSTATUS_LETTER
