@@ -85,6 +85,9 @@ export default function PdfUploadButton({ onParsed }: Props) {
         return
       }
 
+      // DEBUG: log extracted text to console so we can see pdfjs output order
+      console.log('=== PDF RAW TEXT (pdfjs per-item) ===\n' + text.slice(0, 2000))
+
       const parsed = parseLabReportText(text)
       onParsed(parsed)
       setSuccess(true)
