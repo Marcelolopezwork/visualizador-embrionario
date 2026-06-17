@@ -7,14 +7,12 @@ interface Props {
   onParsed: (data: Partial<EmbryoCase>) => void
 }
 
-// Extract text from PDF in the browser using pdfjs-dist (no server needed)
+// Extract text from PDF in the browser using pdfjs-dist.
+// Items are sorted by vertical position (top→bottom, left→right)
+// to match pdftotext's reading order, which our parser expects.
 async function extractTextFromPDFBrowser(file: File): Promise<string> {
   const arrayBuffer = await file.arrayBuffer()
-
-  // Dynamically import pdfjs only when needed
   const pdfjsLib = await import('pdfjs-dist')
-
-  // Use the worker file served from /public (works on Vercel and locally)
   pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs'
 
   const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise
@@ -22,8 +20,41 @@ async function extractTextFromPDFBrowser(file: File): Promise<string> {
   let text = ''
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i)
+    const viewport = page.getViewport({ scale: 1 })
     const content = await page.getTextContent()
-    text += content.items.map((it) => ('str' in it ? it.str : '')).join('\n') + '\n'
+
+    type RawItem = { str: string; transform: number[] }
+    type LineItem = { str: string; x: number; y: number }
+
+    const items: LineItem[] = content.items
+      .filter((it): it is RawItem => 'str' in it && !!(it as RawItem).str.trim())
+      .map((it) => ({
+        str: it.str.trim(),
+        x: it.transform[4],
+        y: viewport.height - it.transform[5], // flip: PDF y=0 is bottom
+      }))
+
+    // Group into lines: items within 6px vertically → same line
+    const LINE_THRESHOLD = 6
+    const lines: LineItem[][] = []
+    for (const item of items.sort((a, b) => a.y - b.y)) {
+      const last = lines[lines.length - 1]
+      if (last && Math.abs(item.y - last[0].y) < LINE_THRESHOLD) {
+        last.push(item)
+      } else {
+        lines.push([item])
+      }
+    }
+
+    // Output each item on its own line (sorted Y then X).
+    // Joining same-row items with spaces merges two-column headers (e.g. "Paciente Esposo"),
+    // which breaks the label-based parser. One item per line keeps tokens isolated.
+    for (const line of lines) {
+      line.sort((a, b) => a.x - b.x)
+      for (const item of line) {
+        text += item.str + '\n'
+      }
+    }
   }
   return text
 }

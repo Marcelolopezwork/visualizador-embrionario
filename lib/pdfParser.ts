@@ -31,20 +31,17 @@ export function parseLabReportText(raw: string): Partial<EmbryoCase> {
   // ── Doctor ──────────────────────────────────────────────────────
   // "Medico" label then two lines: "Edwin Victor Canales\nRimachi"
   const medicoIdx = nonEmpty.findIndex(l => /^M[eé]dico$/i.test(l))
-  const doctorName = medicoIdx >= 0
-    ? [nonEmpty[medicoIdx + 1], nonEmpty[medicoIdx + 2]]
-        .filter(l => l && !/^\d/.test(l) && !/^Edwin.*Rimachi/i.test(l) && l.length > 2)
-        .join(' ').trim() || undefined
+  // Skip adjacent-column labels and age-only lines to reach doctor's name
+  const doctorFull = medicoIdx >= 0
+    ? (() => {
+        for (let i = medicoIdx + 1; i < Math.min(medicoIdx + 6, nonEmpty.length); i++) {
+          const l = nonEmpty[i]
+          if (l && l.length > 2 && !/^\d+\s*(años)?$/.test(l) && !ADJACENT_LABELS.test(l)) return l.trim()
+        }
+        return undefined
+      })()
     : undefined
-
-  // Grab lines between "Medico" and "Inducción", skip lines that are digits or "40 años"
-  const doctorBlock = text.match(/M[eé]dico\s*\n([\s\S]+?)\nInducción/i)
-  const doctorFull = doctorBlock
-    ? doctorBlock[1].split('\n')
-        .map(l => l.trim())
-        .filter(l => l && !/^\d+\s*(años)?$/.test(l))
-        .join(' ').trim()
-    : doctorName
+  const doctorName = doctorFull
 
   // ── Biologist ───────────────────────────────────────────────────
   // "Luis Guzman Masias\nBiologo"
@@ -89,20 +86,21 @@ export function parseLabReportText(raw: string): Partial<EmbryoCase> {
   // The "50" is motility — citolizados appears after Semen Fresco section
   // In this PDF layout: "No fecundado\n1 PN\n3" — the '3' is actually notFertilized count
   // pdftotext reads column headers then values: NF_label, 1PN_label, NF_value
-  const noFertMatch = text.match(/No fecundado\n1 PN\n(\d+)/)
+  // Fertilization: labels appear together then values follow in the same order.
+  // Works for both pdftotext (column-separated) and pdfjs per-item output.
+  const noFertMatch = text.match(/No fecundado\s*\n(?:1 PN\s*\n)?(\d+)/)
   const notFertilized = noFertMatch ? parseInt(noFertMatch[1], 10) : undefined
 
-  // 1PN value appears after the 2PN block in this layout (usually blank/0)
-  const onePNMatch = text.match(/1 PN\n(\d+)\n\n2 PN/)
+  const onePNMatch = text.match(/1 PN\s*\n(\d+)\s*\n(?:\n|2 PN)/)
   const onePN = onePNMatch ? parseInt(onePNMatch[1], 10) : undefined
 
-  const twoPNMatch = text.match(/2 PN\n(\d+)/)
+  const twoPNMatch = text.match(/2 PN\s*\n(\d+)/)
   const twoPN = twoPNMatch ? parseInt(twoPNMatch[1], 10) : undefined
 
-  const threePNMatch = text.match(/3 PN\n(\d+)/)
+  const threePNMatch = text.match(/3 PN\s*\n(\d+)/)
   const threePN = threePNMatch ? parseInt(threePNMatch[1], 10) : undefined
 
-  const citoMatch = text.match(/Citolizados\n(\d+)/)
+  const citoMatch = text.match(/Citolizados\s*\n(\d+)/)
   const cytolyzed = citoMatch ? parseInt(citoMatch[1], 10) : undefined
 
   // ── Embryo table ────────────────────────────────────────────────
@@ -145,13 +143,18 @@ export function parseLabReportText(raw: string): Partial<EmbryoCase> {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+// Labels that appear adjacent (right-column) in the two-column PDF layout.
+// When pdfjs outputs items one-per-line sorted by Y, these appear right after
+// a left-column label — we skip them to reach the actual value.
+const ADJACENT_LABELS = /^(Esposo|C[oó]nyuge|Pareja|M[eé]dico|Bi[oó]logo|Bi[oó]loga|Fecha\b|Total\b|MII\b|MI\b|VG\b|Atres\.|Decumulados|Desacumulados|OUT\b|Inducci[oó]n|Punci[oó]n|Transferencia|Criopreservado|Citolizados|No fecundado|[123] PN|Semen|NGS|NF)$/i
+
 function lineAfterLabel(lines: string[], pattern: RegExp): string | undefined {
   const idx = lines.findIndex(l => pattern.test(l))
   if (idx < 0) return undefined
-  // Skip lines that look like labels or are empty
-  for (let i = idx + 1; i < Math.min(idx + 4, lines.length); i++) {
+  // Skip adjacent-column labels and pure-digit lines to reach the actual value
+  for (let i = idx + 1; i < Math.min(idx + 6, lines.length); i++) {
     const l = lines[i]
-    if (l && l.length > 2 && !/^\d+$/.test(l)) return l.trim()
+    if (l && l.length > 2 && !/^\d+$/.test(l) && !ADJACENT_LABELS.test(l)) return l.trim()
   }
   return undefined
 }
